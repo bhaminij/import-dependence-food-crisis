@@ -1,0 +1,466 @@
+---
+title: "Understanding the role of wheat import dependency on food insecurity: reflections for crisis"
+author: "Bhamini Jain"
+date: "2023-04-26"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning=FALSE, message = FALSE)
+library(tidyverse)
+library(ggplot2)
+library(countrycode)
+library(janitor)
+library(dplyr)
+library(stargazer)
+library(sf) 
+theme_set(theme_bw())
+library(viridis)
+library(maptools)
+library(rnaturalearth)
+library(devtools)
+devtools::install_github("karthik/wesanderson")
+library(wesanderson)
+library(stargazer)
+
+#read: Food Security 
+fs <- read.csv("FS29MAR23.csv", na.strings=c("","NA"))
+#read: PSD for wheat - country level 
+psd <- read.csv("psd_grains_pulses.csv")
+#world data for creating maps 
+world <- ne_countries(scale = "medium", returnclass = "sf")
+```
+
+```{r PSD_Tidy, echo=FALSE}
+#PSD - CLEAN UP DF
+
+#tidying data to have required data, focusing only on wheat 
+psd_tidy <- psd %>%
+  select(Country_Name, Market_Year, Commodity_Description, Attribute_Description, Value) %>%
+  # select columns needed
+  filter(Commodity_Description=="Wheat") %>% #filter to wheat
+  select(-Commodity_Description) %>% 
+  #pivot to turn attributes into columns 
+  pivot_wider(names_from = Attribute_Description, values_from = Value) 
+
+#rename colnames for ease of use 
+colnames(psd_tidy) <- c("Country", "Year", "AreaHarvest","BegStocks", "DomConsump", "EndStocks", "Exports", "FeedDomConsump", "FSIConsump", "Imports", "Production", "TotalDistrib","TotalSupply", "TYExports", "TYImportFromUS", "TYImports", "Yield" )
+
+
+psd_tidy <- psd_tidy %>%
+  # tidy to remove extra columns
+ select(-c(Yield, TYExports, TYImportFromUS, TYImports, AreaHarvest, BegStocks, Production))%>%
+  # filter to keep df between 2000 - 2022 time range 
+  filter(Year>1999)
+
+# add column and calculate import dependency ratio 
+psd_tidy <- psd_tidy %>%
+  mutate(ImportDepenRatio = (Imports/TotalSupply)*100) 
+
+# the data is clubbed for EU. We need two data frame's: one with the clubbed data and another with data copied to individual countries.  The chloropleth map of the world will need data for individual countries, so it shows in the map. Please note: this will just copy the EU data to each country. Whereas, for our lollipop graph and our regression analysis we will need to keep the data clubbed, as it is one data point, for more accurate results. 
+
+
+## creating data frame for the lollipop graph: EU data remains clubbed 
+psd_EU  <- psd_tidy %>%
+  filter(Year==2022) %>% #filter to time frame 
+  select(-c(Year)) %>%
+  mutate(iso3c = countrycode(Country, origin =  "country.name",destination = "iso3c"))
+
+## creating data fram for chloropleth map:: EU data is copied to its individual countries
+### adding countries in EU to dataframe
+eu_countries <- countryname_dict %>% 
+  select(country.name.en) %>% 
+  distinct() %>%
+  mutate(region = countrycode(country.name.en, origin = "country.name", destination = "eu28")) %>%
+  filter(region == "EU", country.name.en != "United Kingdom") %>%
+  mutate(Country = "European Union")
+
+#filtering to data that is EU so we can add data to the countrynames (repeating EU data for every country in the EU) 
+eu_data <- psd_tidy %>%
+  filter(Country == "European Union")
+#  joining the data 
+eu_data <- eu_countries %>%
+  left_join(eu_data, by = "Country") %>%
+  select(-Country) %>%
+  rename("Country" = "country.name.en")
+#removing the EU column and binding by eu_data 
+psd_tidy <- psd_tidy %>%
+  filter(Country != "European Union") %>% 
+  bind_rows(eu_data)
+
+# filter to 2022, adding country data to it to join with another data frame later 
+psd_22 <- psd_tidy %>%
+  filter(Year==2022) %>%
+  select(-c(Year)) %>%
+  mutate(iso3c = countrycode(Country, origin =  "country.name",destination = "iso3c"))
+  
+```
+
+```{r FS_Tidy, echo=FALSE}
+#FS - CLEAN UP TIME 
+
+fs_tidy <- fs %>% 
+  #pruning 
+  select(Area, Item, Year,Value) %>%
+  ## filter out extra items: i tried grouping the code below, this just worked better + was neater 
+  filter(Item!="Political stability and absence of violence/terrorism (index)") %>%
+   filter(Item!="Prevalence of severe food insecurity in the male adult population (percent) (3-year average)") %>% 
+  filter(Item!="Prevalence of severe food insecurity in the female adult population (percent) (3-year average)") %>%
+  filter(Item!="Prevalence of moderate or severe food insecurity in the male adult population (percent) (3-year average)") %>%
+  filter(Item!="Prevalence of moderate or severe food insecurity in the male adult population (percent) (3-year average)") %>%
+  filter(Item!="Prevalence of moderate or severe food insecurity in the female adult population (percent) (3-year average)") %>%
+   filter(Item!="Value of food imports in total merchandise exports (percent) (3-year average)") %>%
+  filter(Item!="Percentage of children under 5 years of age who are stunted (modelled estimates) (percent)") %>%
+   filter(Item!="Percentage of children under 5 years of age who are overweight (modelled estimates) (percent)") %>%
+ filter(Item!="Prevalence of obesity in the adult population (18 years and older)") 
+
+fs_tidy <- fs_tidy %>%
+  #widening the data frame 
+  pivot_wider(names_from = Item, values_from = Value) 
+
+#rename columns
+colnames(fs_tidy) <- c("Country", "Year", "CRTEnergy","Undernourish", "SevInsec", "ModSevInsec", "CIDRatio")
+
+
+# fix year from range to single mid_year number 
+fs_tidy <- fs_tidy %>% 
+  separate(col = Year, into = c("year_start", "year_stop"), sep = "-") %>%
+  mutate(year_start = as.numeric(year_start), year_stop = as.numeric(year_stop)) %>%
+  mutate(mid_year = (year_stop + year_start)/(year_stop - year_start))
+
+# removing start and end year 
+fs_tidy <- fs_tidy %>%
+  select(-c(year_start, year_stop))
+
+#fix column names 
+colnames(fs_tidy) <- c("Country", "CRTEnergy","Undernourish", "SevInsec", "ModSevInsec", "CIDRatio", "Year")
+
+#turn to numeric 
+fs_tidy$ModSevInsec <- as.numeric(fs_tidy$ModSevInsec)
+fs_tidy$SevInsec <- as.numeric(fs_tidy$SevInsec)
+fs_tidy$CIDRatio <- as.numeric(fs_tidy$CIDRatio)
+fs_tidy$Year <- as.factor(fs_tidy$Year)
+
+
+# fs with map data (to include country codes) and filtered to 2020
+fs_tidy20 <- fs_tidy %>%
+  filter(Year==2020) %>%
+  mutate(iso3c = countrycode(Country, origin =  "country.name",destination = "iso3c"))
+
+```
+
+```{r JoinedDF, echo=FALSE}
+# usefor all visualisations
+# join fs and psd by country code, this will be the  df for all the maps and analysis where we  use the disaggregated EU
+jointidy<- world %>% 
+  left_join(fs_tidy20, by = c("adm0_a3"  = "iso3c")) %>%
+  left_join(psd_22, by = c("adm0_a3"  = "iso3c")) %>%
+  filter(adm0_a3 != "ATA")
+
+#join fs and psd data for the lollipop graph, this is to make sure that EU shows up as one data point 
+jointidyEU<- world %>% 
+  left_join(fs_tidy20, by = c("adm0_a3"  = "iso3c")) %>%
+  left_join(psd_EU, by = c("adm0_a3"  = "iso3c")) %>%
+  filter(adm0_a3 != "ATA")
+
+```
+
+
+# Introduction
+
+Wheat is an integral commodity crop that serves food security purposes worldwide. Any shocks to wheat availability, as was seen in 2022, have tremendous impacts globally, especially for food security for vulnerable countries and groups. In 2019, wheat and its products accounted for 408 kcals per capita per day of food supply in food crisis countries (GNAFC 2022).
+
+Climate change adds uncertainties and exacerbates socioecological vulnerabilities. Industrial and input-intensive agriculture, which promotes uniformity over genetic diversity, contributes to degrading ecological resilience (iPES-Food 2016). Dwindling social protection budgets, rising national debts, and the prioritization of commodity crop cultivation for exports, limit the scope of self-sufficient production of locally relevant diets and build import-dependence to serve food security needs (iPES-Food 2022; Giménez & Altieri 2013), especially in low-income countries.
+
+In 2022, the world food crisis, wheat was a central commodity of concern. This issue was due to varying reasons, but prominently due to supply chain disruptions in the Black Sea region--Russia and Ukraine, who hold a 27% share of the global wheat trade (UNCTAD 2022, 3). In 2020, 34% of Ukraine’s wheat and maize export went to 38 countries who were in food crisis, while Russia exported 73% of its wheat to countries experiencing food crises (GNAFC 2022). In 2021, 36 out of 50 countries with ongoing food crises imported at least 10% of their imports from Russia (Ibid.). Hence, conflict in the Black Sea region had, and continues to have, far reaching impacts on the trade of wheat (Ibid; Global Crisis Response Group on Food, Energy and Finance, 2022). Low-income countries in the Global South were particularly impacted due to their reliance on the region for wheat imports (import dependence) to meet their food security needs. Given a compounding crisis of global inflation, soaring debt, COVID_19 related impacts and climate change risks, countries found themselves in a precarious position (Clapp & Moseley 2020; iPES-Food 2022).
+ 
+Predominantly, there has been a focus on food production as a tenet of food security. However, food security is not just a function of production, but is also a function of availability, adequacy stability and accessibility (cf:Fakhri 2021). The productivist focus on hunger, i.e., the need to produce more to meet growing demands of hunger is a limited approach. Research shows its limitations in addressing key drivers of hunger (De Schutter 2014; iPES-Food 2022; Patel 2009; Sampson2018), which are inequality and conflict that impact availability, adequacy and especially accessibility (Clapp and Moseley 2022; FAO 2022; GNAFC and FSIN 2022; Hopma et al 2014; iPES-Food2022; Sen 1983). Thus, this research focuses on import-dependence to understand the stability tenet of food insecurity that is impacted by supply chain disruptions, as was noted in 2022 and 2008 food crises. This has far-reaching impacts on availability and accessibility of food like wheat, especially during times of shocks or protracted crises.
+
+This paper focuses on the impacts of import dependency ratio (hereafter, IDR) for wheat on moderate to severe food insecurity. Import dependency ratio indicates the dependence of a country on imports to suffice its consumption needs. This ratio reflects the vulnerability of a country to shocks in the global supply chain. The higher the import dependency ratio for wheat, the more likely a country is to be impacted by supply chain disruptions. This response is also true for economic inflation, for example, the higher the difference in currency exchange, the higher the import bill, the more likely is the shock to impact food security in the country. 
+
+While there are contentions around the securitization of hunger by the framing of “food security” especially considering notions of food sovereignty and the right to food (cf: Dalby 1992; De Schutter 2014; Hopma and Woods 2014; Sommerville et al. 2014) for the limited scope of this paper, we use the terminology as it emerges from the data, while acknowledging these contentions. Hence, this paper does not focus on production, instead, it focuses on import dependence.
+
+### Research Objectives 
+
+This study seeks to understand how food security is impacted by import dependency ratio disaggregated for countries in different income groups. To this end, the research design seeks to answer the following questions: 
+
++ Is there a correlation between import dependence and food security? How does the association change when it is disaggregated against income groups? 
+
++ How do countries, across varying income groups and IDRs, use their stock? What percentage is used for food purposes (food, seed and industrial) or non-food purposes (feed and residual)? 
+
+The study hypothesizes the positive correlation between IDR and food insecurity, especially for lower income countries. Higher income countries or major producers of wheat may not have high correlations in this regard. We also hypothesize a higher percentage of wheat is consumed for food use in countries with higher import dependencies, as opposed to those with lower import dependencies. 
+
+The research underlines the importance of improving self-sufficiency through reducing import-dependence, among others, to build greater resilience against compounding crises and shocks. This study seeks to improve priorities in policy interventions to better account for import dependencies in reducing resilience against increasing propensity of crises. The dynamics emerging from the associations seek to add to the growing literature and calls of action to build equitable and transformational systemic shifts in our food and economic systems to better stand against crises. The paper, finally, seeks to offer additional caution against myopic responses to crises that lock us further into trade and production dependencies that disfavor self-sufficiency and exacerbate inequities. Instead, the momentum could be used for transformational and socioecologically inclusive change, while addressing immediate needs.
+
+
+# Methods
+
+### Data sources  
+ The research is based on datasets from Food and Agriculture Organization (FAO)’s FAOSTAT and United States Department of Agriculture’s Foreign Agricultural Service’s Production, Supply, and Distribution (USDA-PSD) dataset. These are the prominent databases for deriving international food and agricultural data. 
+
++ USDA-PSD: The data for wheat supply, consumption, production, and availability is derived from dataset for grain and pulses. The USDA-PSD collates data from country statistics, foreign attaches in the US, international organizations, traders, and other available sources. The study primarily utilizes production, consumption, import and export data from this source. All the data points used in the study correspond to 1000MT unit of measurement.
+
++ FAOSTAT – Food Security Indicators: Food security data is derived from FAOSTAT's Suite of Food Security Indicators. This dataset is a collection of indicators collating information from sources such as country statistics, FAO Statistics, and other international organizations—as applicable for each indicator. The indicators in this database emerge from the recommendation of experts from the Committee on World Food Security (CFS) Round Table on hunger. The study utilizes “prevalence of moderate to severe food insecurity” as a measure of insecurity. This variable is the percentage as a three-year average. So, 2020 data would be an average for 2019-2021.
+
+ The data sources were transformed to a singular data frame including the variables of concern. The data is filtered to the latest available data because our research is contextualized against the compounding impacts from crises such as the COVID-19 pandemic and Russia-Ukraine war. Therefore, a time range of 2019–2021 is used for food security data from FAOSTAT and 2020 data is used for wheat data from USDA-PSD.
+  
+### Calculations 
+  
+This study uses a bivariate regression test to assess the association between our variables: import dependency ratio (IDR) and moderate to severe food insecurity. Specifically, it measures the impact of IDR (independent variable) on food insecurity (dependent variable) if any. Here, the IDR is calculated by the author using the USDA-PSD data as follows: 
+
+Import dependency Ratio = (Imports/Availability) *100 
+
+Furthermore, the paper assesses the percentage consumption of wheat for feed (feed and residual consumption) and non-feed consumption (food, seed, industrial consumption). The percentages are calculated directly from the USDA-PSD dataset, which already has the two variables. Here, feed data includes residual, i.e., wheat that is lost or unaccounted for.
+  
+### Limitations 
+
+Following are the limitations of our data: 
++ Owing to lags in data collection and updating, the analysis is limited to most recent data and not 2022 when disruptions from Russia-Ukraine were noted. However, the period data for USDA-PSD data and 2019-2021 data for FAOSTAT data account for the impacts of COVID-19 pandemic, and the trade disruptions experienced during this time. 
+
++ There can be many N/As in the country level data, especially for certain years. This issue is true for the food insecurity data for 2019-2021. 
+
++ Issues with measurement: what is measured, what is not and how it is measured—remain as they define what we study and what studies miss.
+
++ The data for European Union (EU) is aggregated in the USDA-PSD dataset, i.e., we do not have country level data for individual countries in the EU. This limits our study of disaggregated impacts on different countries in the EU that belong to different income groups.
+
++ Bivariate analysis gives us limited insights into the association, future studies with multivariate analysis contextualized against different income groups, will provide more robust insights contextualized against different income groups, will provide more robust insights. 
+
+ 
+# Results
+
+### Regression Analysis: bivariate relationship between IDR and food insecurity  
+ 
+The bivariate regression analysis (Table 1) reveals a slope of 0.33 and an intercept (constant) of 16.29. This result suggests an (estimated) linear relationship between the variables with the equation:
+
+Moderate-severe food insecurity = 16.29 + 0.33*IDR
+
+The positive slope indicated a positive correlation between our variables. The results are strongly statistically significant at all major thresholds (p-value less than 0.01). Put simply, this means that an increase in import dependence is strongly associated with an increased prevalence of moderate to severe food insecurity in a country. Therefore, the result affirms our hypothesis of a positive association, and we can reject the null hypothesis of no associations.
+
+When we visualize this relationship accounting for different income groups (high income OECD and non-OECD, upper-middle income, lower-middle income, and low income), the slopes (line of best fit highlighting the linear regression) vary (Figure 1). 
+
+```{r LM_EXPLORATORY, echo=FALSE, warning=FALSE, message=FALSE, fig.show=FALSE, eval=FALSE}
+
+#Calculate linear regression 
+
+## I'm using the data frame where data is not disaggregated by EU countries. This is because the EU data just reappears for each country (increases the data points with the same data). Therefore, better to use  the data frame is aggregated, so it gives us more accurate regressions. 
+#this code chunk is exploratory to understand relationships and dynamics.
+
+
+##regression for import dependency impacting insecurity
+lm(ModSevInsec ~ ImportDepenRatio, jointidyEU, na.rm=T)%>%
+  summary() # positive association, significant at 0.001 levels 
+
+
+```
+
+```{r LMtableIDR,warning=FALSE, message=FALSE, echo = FALSE, fig.align='center', fig.show=FALSE}
+
+#Calculate linear regression 
+
+## I'm using the data frame where data is not disaggregated by EU countries. This is because the EU data just reappears for each country (increases the data points with the same data). Therefore, better to use  the data frame is aggregated, so it gives us more accurate regressions. 
+
+# create model 
+lmIDR <- lm(ModSevInsec ~ ImportDepenRatio, jointidyEU, na.rm=T)
+
+#create regression table
+stargazer(lmIDR, 
+          type = "text", 
+          style = "default",
+          title = "Table 1. Linear Regression Results", 
+          # add dependent variable caption
+          dep.var.caption = "Dependent Variable : Moderate-Severe Insecurity",
+          # add covariate variable caption
+          covariate.labels= "Import Dependence Ratio")
+
+```
+
+```{r LMIDRplot, fig.align='center', echo=FALSE}
+# Plot: regression best fit line between import dependency and insecurity, facet wrapped by income group
+
+# Create a palette with 5 colors from the viridis plasma palette
+my_palette <- viridis_pal(option = "plasma")(5)
+
+color = my_palette[2]
+#color-blindness friendly palette
+# these colors will be used for the best fit line
+  
+# plot regression line
+
+ggplot(jointidy, aes(x  = ImportDepenRatio, y = ModSevInsec)) +
+  geom_smooth(method = "lm", color = my_palette[1])+ #for linear regression
+  geom_point(color = my_palette[4])+ 
+  facet_wrap(~income_grp) + # to group result by income group 
+  labs(title = "Figure 1. Association between Import Dependency and Food Insecurity",
+       subtitle = "Faceted by income groups",
+        x = "Import Dependency Ratio",
+        y = "Moderate-Severe Food Insecurity (%)")+
+  theme(plot.title = element_text(vjust = 1))
+
+
+```
+When the regression is disaggregated by income groups, the associations between food insecurity and import dependency ratio vary, represented by the slope in each graph of Figure 1. The almost flat slope for high-income OECD countries indicates that our model does not fit this group. IDRs have relatively little relevance to food insecurity in this group. The slope is steeper for high-income non-OECD groups as most of the data points have higher import dependency ratios as opposed to the previous group. Here, food insecurity remains mostly below 30%. 
+The slopes get steeper as we move into lower income groups. For upper-middle income countries, most of them have food insecurity levels below 50% with IDRs ranging from 0 to 100%. This group has the most spread-out data for IDR with data grouped at low IDR levels, at mid IDR levels (around 50) and at high levels (above 75). For lower-middle income countries most of the food insecurity is between 20-60% and IDR above 60. 
+
+The slope is the steepest for low-income countries, where over half the countries have high IDRs (above 75) and high prevalence of food insecurity (most data is above 50%). Hence, food insecurity does not only increase with associated increase in import dependency ratio, but the effects are also exacerbated the lower a country’s income grouping is.
+
+### Mapping IDR and prevalence of food insecurity across countries   
+ 
+These associations and patterns are further described by the choropleth maps of food insecurity and import dependence across the world. Figure 2 reflects the import dependencies for specific countries from 0 to 100. While figure 3 highlights the prevalence of food insecurity across the world. We see high prevalence in continental Africa, South-East Asia, and Central-South America. Here, some countries with the highest IDR are also low-income countries that are also categorized as least developed regions, namely: Chad, Somalia, Madagascar. In figure 3, we note that these countries also have some of the highest levels of food insecurity. Some high-income countries also have the highest IDR, including Hong Kong, Barbados, Singapore, and Kuwait—who do not have corresponding high levels of food insecurity. Thereon, we have Argentina, Russia, and Ukraine with less than 1% import dependence as these are some of the major producers. While, Morocco, North Korea, Sudan, and Mexico represent the middle range of IDR. Morocco, North Korea, Sudan, Mexico etc. in the middle range. Countries like the USA, Australia, Canada, and European Union (aggregated) have low food insecurity and low IDRs.
+
+```{r MAPIDR, fig.align='center',echo=FALSE}
+# create map with import dependency ratio using viridis color scheme 
+ggplot() +
+  geom_sf(data = jointidy, 
+               aes(fill = ImportDepenRatio)) + 
+  scale_fill_viridis(option = "plasma", 
+                     trans = "sqrt",
+                     breaks = seq(0, 100, 25), #add breaks in steps of 25
+                     labels = c("Low", "25", "50", "75",  "High")) +  #label the breaks
+    labs(title = "Figure 2. Import dependency across the world",
+        fill = "Range",
+        caption = "Source: Author's calculations based on USDA-PSD data for 2020 \n The data ranges from 0 (low IDR) to 100 (high IDR)") + 
+  theme(plot.title = element_text(vjust = 5),
+        plot.caption = element_text(vjust = -3))
+
+```
+
+```{r MapInsec, fig.align='center', echo=FALSE}
+#create map with food insecurity data 
+ggplot() +
+  geom_sf(data = jointidy, 
+               aes(fill = ModSevInsec)) + 
+  scale_fill_viridis_c(option = "plasma",
+                       trans = "sqrt",
+                       breaks = seq(0, 100, 25), #add breaks in steps of 25
+                       labels = c("Low","25","50","75","High")) +  #label the breaks 
+   labs(title = "Figure 3. Prevalence of moderate to severe food insecurity",
+        fill = "Range",
+        caption = "Source: FAOSTAT- Food Security Indicators data for the year 2019-2021.\n Prevalence measures 3-year averages (%). \n The data ranges from 0 (low insecurity) to 100 (high insecurity)") + 
+   theme(plot.title = element_text(vjust = 5),
+         plot.caption = element_text(vjust = -3))  
+
+```
+
+### Food use consumption pattern across import dependencies    
+
+The analysis of consumption pattern of wheat across countries from different income groups reveals interesting insights. Figure 4 shows the countries in descending order on the Y axis from the top where countries at the top at the highest IDR and countries in the bottom have the lowest IDR, with each country data revealing the percentage consumption for food, seed and industrial (FSI) use. Whereas figure 5 focuses on specific data points mentioned in the results for greater readability. 
+
+```{r WheatConsumptionPatternWorld, fig.width =10, fig.height =22, fig.align='center', echo=FALSE} 
+#create lollipop plot with wheat consumption ordered according to import dependency ratio
+
+## calculate percentage of consumption and make a df with it 
+jointidy_pertotal<-jointidyEU %>%
+  mutate(PerFSI = (FSIConsump*100/DomConsump)) %>%
+  mutate(PerFeed = (FeedDomConsump*100/DomConsump))
+
+  #pivot_longer(names_to = "PerTarget", values_to = "Value",
+               #cols = PerFSI:PerFeed) # use this only if you do stacked bar plot 
+
+# select a range of colors from the viridis palettes to make a categorical palette that matches the aesthetic 
+
+my_colors <- c("#b12a90", "#e16462", "#355f8d","#22a884","#fca50a", "#bddf26" )
+
+## plot lollipop graph
+jointidy_pertotal %>%
+  mutate(admin = fct_reorder(admin, ImportDepenRatio)) %>% #reorder by import dependency
+  filter(!is.na(PerFSI)) %>%
+ggplot() + 
+  geom_segment(aes(x = 0, xend = PerFSI, y = admin, yend = admin, color = income_grp), size = 0.7) + 
+  geom_point(aes(x = PerFSI, y = admin, color = income_grp)) +
+  scale_color_manual(values = my_colors) +
+  labs(title = "Figure 4. Wheat FSI consumption: All countries",
+        subtitle = "Organised by descending import dependency ratios",
+        x = "Consumption for Food, Seed, Industrial Uses (%) ",
+        y = "Countries",
+       color="Income Group",
+       caption= "Note:  Visualisation based on 2020 data.")
+``` 
+
+Figure 4 lists all the countries in our dataset to highlight the pattern of usage change as IDR changes and across different income groups. Most of the countries who have the highest IDRs are also low-income countries that use close to 100% of their wheat for FSI purposes. However, with lower IDRs we witness greater variance in wheat used for food consumption. Countries with lower import dependency ratio display a higher variance in consumption patterns. This is especially true for high-income groups which display the highest variance, with many countries using wheat for FSI at less than 75%. The countries with the lowest IDR (at the bottom of the chart): Argentina, India, Russia, and Ukraine are some of the major producers of wheat. Countries like Barbados and Singapore, which are higher income countries and high IDR use almost 100% of their wheat for FSI purposes. Meanwhile, Somalia, Sierra Leone, and Republic of Congo the countries with the highest IDR, which are also low income, use nearly 100% of their wheat for FSI. Therefore, for low-income countries with high IDRs, who also tend to have higher prevalence of food insecurity, tend to use most of their wheat for FSI use. This pattern sees greater variance as we move to higher income groups.
+
+```{r WheatConsumptionPatternFiltered, fig.align='center',  echo=FALSE} 
+# create same lollipop plot but now filtered to selected countries
+
+## plot lollipop graph
+
+jointidy_pertotal %>%
+  mutate(admin = fct_reorder(admin, ImportDepenRatio)) %>% #reorder by import dependency
+  filter(!is.na(PerFSI)) %>% 
+  #filter to countries of focus
+  filter(admin %in% c("India", "Republic of Congo", "Singapore", "United Kingdom", "Australia", "New Zealand", "Somalia", "Sierra Leone", "Kuwait", "United States of America", "Democratic Republic of Congo", "Malaysia", "Russia", "Philippines", "Belarus", "South Korea", "Vietnam", "Japan", "Argentina", "Nepal", "Kazakhstan", "Ethiopia", "Niger", "Madagascar", "Barbados")) %>% 
+ggplot() + 
+  geom_segment(aes(x = 0, xend = PerFSI, y = admin, yend = admin, color = income_grp)) + 
+  geom_point(aes(x = PerFSI, y = admin, color = income_grp)) +
+  scale_color_manual(values = my_colors) +
+  labs(title = "Figure 5. Wheat FSI consumption: Selected Countries",
+       subtitle = "Organised by descending import dependency ratios",
+        x = "Consumption for Food, Seed, Industrial Uses (%) ",
+        y = "Countries",
+       color="Income Group",
+       caption= "Note: Visualisation based on 2020 data.")+
+  theme(plot.title = element_text(vjust = 0.5),
+         plot.caption = element_text(vjust = -1)) 
+
+``` 
+ 
+ 
+ # Discussion 
+ 
+ Import dependency ratio significantly explains food insecurity in countries, especially for low-income countries. In times of shocks, if there are price shocks or if supply disruptions impact imports, food security is also impacted. This effect is magnified for lower income countries that use most of their wheat for food, seed, and industrial use (FSI) i.e., food-use. Given the increasing number of shocks to the dominant agri-food system that is highly vulnerable shocks there is a need to transitions to self-sufficiency in low-income countries because these countries are at the highest risks of having disproportionate impacts to hunger as the country’s capacity to invest in present and future resilience is low. Put simply, low-income countries are the most vulnerable to shocks.
+
+There are many ways, this can be achieved: by improving stockholding policies at the WTO level, enabling agroecological transitions by moving investments towards it and providing debt relief as many low-income countries also face some of the highest unsustainable debt burdens. The countries in East and Sub-Saharan Africa who had both high IDR and prevalence of food insecurity, are also countries that are dependent on Russia and Ukraine for wheat imports and were thus profoundly impacted. We also noted some high-income countries with high IDR, like Singapore. This is because of the spatial makeup of the country wherein it focuses on imports, but because it is well-resourced it can invest in resilience.
+
+Future studies should create robust multivariate models to map the association against other factors such as debt that impact the political economy of hunger, contextualized against different income groups. It would be beneficial to see how the trends have changed over time for low-income countries for case study analysis. Additionally, integrating updated data from 2022, as it becomes available would be beneficial. This study should be used to offer a baseline to understand different policy pathways at international and national levels for improving self-sufficiency. Moreover, it is critical to analyze the data against expanded food security indicators for nutrition and nourishment. A big drawback of commodity specialization especially with food security is that nutrition is compromised, and issues of undernourishment and over-nourishment are not well captured. Hence, such a study would offer interesting insights on more holistic impacts for food security on populations.
+
+
+# Conclusion
+
+This paper highlights the importance of critically assessing the political economy of hunger and food crises and rethinking the current paradigms that have us locked into import dependence for food security. The results of our study match our hypothesis of a positive correlation between IDR and food insecurity in lower income countries. Furthermore, given that most of these countries depend on these imports to service most of their food consumption needs, the role of reducing dependencies in the face of increasing crisis needs to be pushed. Beyond that, policymakers need to avoid myopic crisis responses that further lock us into these path dependencies as they exacerbate inequities and have gregarious impacts on hunger. The results of the study urge the need for required systemic changes and investments that would enable the creation of self-sufficiency and inclusive change such that countries can meet both immediate and long-term needs especially in times of crisis.
+
+
+
+
+# Works Cited 
+
+Clapp, Jennifer, and William G. Moseley. 2020. “This Food Crisis Is Different: COVID-19 and the Fragility of the Neoliberal Food Security Order.” The Journal of Peasant Studies, October. http://www.tandfonline.com/doi/abs/10.1080/03066150.2020.1823838.
+
+Dalby, Simon. 1992. “Security, Modernity, Ecology: The Dilemmas of Post-Cold War Security Discourse.” Alternatives 17 (1): 95–134. https://doi.org/10.1177/030437549201700104.
+
+De Schutter, Olivier. 2014. “The Specter of Productivism and Food Democracy.” Wisconsin Law Review 2: 199–234.
+ 
+Fakhri, Michael. 2021. “A Trade Agenda for the Right to Food.” Development. https://doi.org/10.1057/s41301-021-00305-0.
+
+Food Security Indicators. FAOSTAT. 
+
+Food Security Portal. 2021. “Production and Stocks Monitoring System.” Tool. June 11, 2021. https://www.foodsecurityportal.org/node/1734.
+ 
+Global Crisis Response Group on Food, Energy and Finance. 2022. “BRIEF NO.1: Global Impact of War in Ukraine on Food, Energy and Finance Systems.” Brief 1. United Nations Global Crisis Response Group on Food, Energy and Finance.
+
+GNAFC. 2022. “War in Ukraine and Its Impact on Food Crises: A Review of Existing Analyses and Evidence.” Situation Overview. Global Network Against Food Crises. http://www.fightfoodcrises.net/crises.
+
+GNAFC, and FSIN. 2022. “Global Report on Food Crises (GRFC 2022).” 6th. Food Security Information Network (FSIN) & Global Network Against Food Crisis (GNAFC). http://www.indiaenvironmentportal.org.in/files/file/GRFC%202022.pdf.
+
+Holt-Giménez, Eric, and Miguel   A. Altieri. 2013. “Agroecology, Food Sovereignty, and the New Green Revolution.” Agroecology and Sustainable Food Systems 37 (1): 90–102. https://doi.org/10.1080/10440046.2012.716388.
+
+Hopma, Justa, and Michael Woods. 2014. “Political Geographies of ‘Food Security’ and ‘Food Sovereignty.’” Geography Compass 8 (11): 773–84. https://doi.org/10.1111/gec3.12163.
+
+iPES-Food. 2016. “From Uniformity to Diversity: A Paradigm Shift from Industrial Agriculture to Diversified Agroecological Systems.” International Panel of Experts on Sustainable Food systems. https://ipes-food.org/_img/upload/files/UniformityToDiversity_FULL.pdf.
+
+iPES-Food. 2022. “Another Perfect Storm?:  How the Failure to Reform Food Systems Has Allowed the War in Ukraine to Spark a Third Global Food Price Crisis in 15 Years, and What Can Be Done to Prevent the next One.” Special Report. International Panel of Experts on Sustainable Food Systems.
+ 
+Patel, Raj. 2013. “The Long Green Revolution.” Journal of Peasant Studies 40 (1): 1–63. https://doi.org/10.1080/03066150.2012.719224.
+
+Sampson, Devon. 2018. “Productivism, Agroecology, and the Challenge of Feeding the World.” Gastronomica 18 (4): 41–53. https://doi.org/10.1525/gfc.2018.18.4.41.
+ 
+Sen, Amartya. Poverty and Famines: An Essay on Entitlement and Deprivation.1983.
+ 
+Sommerville, Melanie, Jamey Essex, and Philippe Le Billon. 2014. “The ‘Global Food Crisis’ and the Geopolitics of Food Security.” Geopolitics 19 (2): 239–65. https://doi.org/10.1080/14650045.2013.811641.
+
+UNCTAD.2022. The Impact on Trade and Development of the War in Ukraine: UNCTAD Rapid Assessment. https://unctad.org/system/files/official-document/osginf2022d1_en.pdf
+
+Foreign Agricultural Service’s Production, Supply and Distribution (USDA-PSD). United States Department of Agriculture. 
+
+
